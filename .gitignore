@@ -1,0 +1,36 @@
+# 模型文件和日志
+*.pth
+*.pth.tar
+*.pkl
+*.h5
+*.ckpt
+
+# 日志目录
+logs*/
+log/
+logs-*/
+
+# 数据集
+data/
+datasets/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
