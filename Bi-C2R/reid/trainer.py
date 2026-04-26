@@ -60,8 +60,88 @@ class Trainer(object):
         new_sim_prob_unpair_log_ = torch.log(new_sim_prob_unpair_)
         return self.weight_anti * self.criterion_anti_forget(new_sim_prob_unpair_log_, old_sim_prob_unpair_)
 
+    def stkr_rectify(self, R_old, targets):
+        """
+        Short-Term Knowledge Rectification (STKR) from LSTKC++.
+        Corrects erroneous relation scores in R_old using GT identity labels.
+        R_old: [B, B] affinity matrix (softmax-normalized, each row sums to 1)
+        targets: [B] identity labels
+        Returns rectified matrix R_tilde, L1-normalized per row.
+        """
+        B = R_old.shape[0]
+        same_id = (targets.unsqueeze(1) == targets.unsqueeze(0))  # [B, B]
+        diff_id = ~same_id
+
+        # sn[i] = min affinity among same-ID pairs for row i (negative threshold)
+        # sp[i] = max affinity among diff-ID pairs for row i (positive threshold)
+        R_same = R_old.masked_fill(diff_id, float('inf'))
+        R_diff = R_old.masked_fill(same_id, float('-inf'))
+        sn = R_same.min(dim=1, keepdim=True)[0]  # [B, 1]
+        sp = R_diff.max(dim=1, keepdim=True)[0]  # [B, 1]
+
+        # Clamp: intra-ID scores >= sp, inter-ID scores <= sn
+        R_tilde = torch.where(same_id, torch.maximum(R_old, sp), torch.minimum(R_old, sn))
+
+        # L1 normalize each row
+        row_sum = R_tilde.sum(dim=1, keepdim=True).clamp(min=1e-8)
+        return R_tilde / row_sum
+
+    def complementary_stkr(self, R_short, R_long, targets):
+        """
+        Complementary Short-Term Knowledge Rectification (C-STKR) from LSTKC++.
+        Uses two old models' relation matrices to produce a better rectified target.
+        """
+        B = R_short.shape[0]
+        same_id = (targets.unsqueeze(1) == targets.unsqueeze(0))  # [B, B]
+        diff_id = ~same_id
+
+        # Determine correctness for each element in each model
+        # A score is "correct" if:
+        #   same-ID pair: score >= max diff-ID score (sp) for that row
+        #   diff-ID pair: score <= min same-ID score (sn) for that row
+        def is_correct(R):
+            R_same = R.masked_fill(diff_id, float('inf'))
+            R_diff = R.masked_fill(same_id, float('-inf'))
+            sn = R_same.min(dim=1, keepdim=True)[0]
+            sp = R_diff.max(dim=1, keepdim=True)[0]
+            correct_intra = same_id & (R >= sp)
+            correct_inter = diff_id & (R <= sn)
+            return correct_intra | correct_inter  # [B, B] bool
+
+        correct_s = is_correct(R_short)
+        correct_l = is_correct(R_long)
+
+        # Rectify each model independently first
+        R_tilde_s = self.stkr_rectify(R_short, targets)
+        R_tilde_l = self.stkr_rectify(R_long, targets)
+
+        # Complementary fusion:
+        # both correct or both wrong -> average
+        # only one correct -> use the correct one
+        both_correct = correct_s & correct_l
+        only_s_correct = correct_s & ~correct_l
+        only_l_correct = ~correct_s & correct_l
+
+        R_tilde = (R_tilde_s + R_tilde_l) / 2.0
+        R_tilde = torch.where(only_s_correct, R_tilde_s, R_tilde)
+        R_tilde = torch.where(only_l_correct, R_tilde_l, R_tilde)
+
+        # L1 normalize each row
+        row_sum = R_tilde.sum(dim=1, keepdim=True).clamp(min=1e-8)
+        return R_tilde / row_sum
+
+    def get_affinity(self, model, imgs, tau=0.1):
+        """Extract normalized affinity matrix from a frozen model."""
+        with torch.no_grad():
+            feats, _, _, _ = model(imgs, get_all_feat=True)
+            if isinstance(feats, tuple):
+                feats = feats[0]
+        feats = F.normalize(feats, p=2, dim=1)
+        sim = feats @ feats.T
+        return F.softmax(sim / tau, dim=1)
+
     def train(self, epoch, data_loader_train,  optimizer, training_phase,
-              train_iters=200, add_num=0, old_model=None,         
+              train_iters=200, add_num=0, old_model=None, old_model_long=None,
               ):
 
         self.model.train()
@@ -104,9 +184,19 @@ class Trainer(object):
                     s_features_old, bn_feat_old, cls_outputs_old, feat_final_layer_old = old_model(s_inputs, get_all_feat=True)
                 if isinstance(s_features_old, tuple):
                     s_features_old=s_features_old[0]
+
+                # LSTKC++ knowledge rectification distillation
                 Affinity_matrix_new = self.get_normal_affinity(s_features)
-                Affinity_matrix_old = self.get_normal_affinity(s_features_old)
-                divergence = self.cal_KL(Affinity_matrix_new, Affinity_matrix_old, targets)
+                if old_model_long is not None:
+                    # C-STKR: complementary rectification using both short-term and long-term old models
+                    R_short = self.get_affinity(old_model, s_inputs)
+                    R_long  = self.get_affinity(old_model_long, s_inputs)
+                    R_tilde = self.complementary_stkr(R_short, R_long, targets)
+                else:
+                    # STKR: single old model rectification (step t=2)
+                    R_old = self.get_affinity(old_model, s_inputs)
+                    R_tilde = self.stkr_rectify(R_old, targets)
+                divergence = self.KLDivLoss(torch.log(Affinity_matrix_new + 1e-8), R_tilde)
                 loss = loss + divergence * self.AF_weight
 
                 
