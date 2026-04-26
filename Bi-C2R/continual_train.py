@@ -156,7 +156,7 @@ def main_worker(args, cfg):
             # model_long already holds Theta_1^s from previous iteration
             best_alpha = get_adaptive_alpha(args, model, model_long, all_train_sets, set_index)
             print('M*_e fusion weight delta={:.4f}'.format(best_alpha))
-            model = linear_combination(args, model_long, model, best_alpha)
+            model = linear_combination(args, model, model_long, best_alpha)
             model_short_old = copy.deepcopy(model_old)  # Theta_1^s for next step
             model_long = copy.deepcopy(model)            # Theta_2^l = fused model
         else:
@@ -168,7 +168,7 @@ def main_worker(args, cfg):
             # M*_e: Eq.(15) delta, fuse Theta_t^s and Theta_t^l
             best_alpha = get_adaptive_alpha(args, model, model_long, all_train_sets, set_index)
             print('M*_e fusion weight delta={:.4f}'.format(best_alpha))
-            model = linear_combination(args, model_long, model, best_alpha)
+            model = linear_combination(args, model, model_long, best_alpha)
 
             model_short_old = copy.deepcopy(model_old)  # Theta_{t-1}^s for next step
             model_long = copy.deepcopy(model)            # Theta_t^l = fused model
