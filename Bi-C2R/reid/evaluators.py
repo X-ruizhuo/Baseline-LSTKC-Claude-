@@ -3,6 +3,7 @@ import time
 from collections import OrderedDict
 import numpy as np
 import torch
+import os
 
 from .evaluation_metrics import cmc, mean_ap, mean_ap_cuhk03
 from .feature_extraction import extract_cnn_feature
@@ -214,9 +215,14 @@ class Evaluator(object):
         else:
             features = pre_features
 
-        features_old = torch.load(old_feat)['features']
-        for key, value in features_old.items():
-            features_old[key] = value.data.cpu()
+        # Check if old feature file exists (first dataset won't have old features)
+        if old_feat is None or not os.path.exists(old_feat):
+            # For the first dataset, use current features as both old and new
+            features_old = features
+        else:
+            features_old = torch.load(old_feat)['features']
+            for key, value in features_old.items():
+                features_old[key] = value.data.cpu()
 
         distmat, query_features, gallery_features = pairwise_distance_rfl(features, features_old, query, gallery, metric=metric)
         results = evaluate_all(query_features, gallery_features, distmat, query=query, gallery=gallery, cmc_flag=cmc_flag, cuhk03=cuhk03)
