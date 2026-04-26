@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=2 python continual_train.py \
+CUDA_VISIBLE_DEVICES=0 python continual_train.py \
     --logs-dir logs-lstkc-setting2/ \
     --setting 2 \
     --AF_weight 1.0 \
