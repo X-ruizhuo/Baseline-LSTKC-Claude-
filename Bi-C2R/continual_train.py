@@ -130,48 +130,14 @@ def main_worker(args, cfg):
     else:
         raise AssertionError(f"the model {args.MODEL} is not supported!")
 
-    # LSTKC++ long-term / short-term model state
-    model_long = None   # Theta_t^l: long-term model (multi-domain balanced knowledge)
-    model_short_old = None  # Theta_{t-1}^s: previous step's short-term trained model
-
-    for set_index in range(0, len(training_set)):
+    for set_index in range(0, len(training_set)):       
         model_old = copy.deepcopy(model)
-
-        # Determine old_model_long for C-STKR in trainer
-        # t=1 (set_index=0): no old models
-        # t=2 (set_index=1): single old model (STKR), no long-term yet
-        # t>=3 (set_index>=2): both short-term and long-term old models (C-STKR)
-        old_model_long_for_train = model_long if set_index >= 2 else None
-
         model, model_trans, model_trans2 = train_dataset(cfg, args, all_train_sets, all_test_only_sets, set_index, model, model_trans, model_trans2, out_channel,
-                                            writer, old_model_long=old_model_long_for_train, logger_res=logger_res)
-
-        # --- LSTKC++ post-training model management ---
-        if set_index == 0:
-            # t=1: no fusion, model_long not yet defined
-            model_long = copy.deepcopy(model)
-            model_short_old = copy.deepcopy(model)
-        elif set_index == 1:
-            # t=2: M*_e with Theta_2^l = Theta_1^s (= model_long from step 0)
-            # model_long already holds Theta_1^s from previous iteration
-            best_alpha = get_adaptive_alpha(args, model, model_long, all_train_sets, set_index)
-            print('M*_e fusion weight delta={:.4f}'.format(best_alpha))
-            model = linear_combination(args, model, model_long, best_alpha)
-            model_short_old = copy.deepcopy(model_old)  # Theta_1^s for next step
-            model_long = copy.deepcopy(model)            # Theta_2^l = fused model
-        else:
-            # t>=3: full LSTKC++ pipeline
-            # M*_o: backward rectification to update long-term model
-            dataset, num_classes, train_loader, test_loader, init_loader, name = all_train_sets[set_index]
-            model_long = backward_rectification(args, model_short_old, model_long, init_loader)
-
-            # M*_e: Eq.(15) delta, fuse Theta_t^s and Theta_t^l
-            best_alpha = get_adaptive_alpha(args, model, model_long, all_train_sets, set_index)
-            print('M*_e fusion weight delta={:.4f}'.format(best_alpha))
-            model = linear_combination(args, model, model_long, best_alpha)
-
-            model_short_old = copy.deepcopy(model_old)  # Theta_{t-1}^s for next step
-            model_long = copy.deepcopy(model)            # Theta_t^l = fused model
+                                            writer,logger_res=logger_res)
+        
+        if set_index>0:
+            best_alpha = get_adaptive_alpha(args, model, model_old, all_train_sets, set_index)
+            model = linear_combination(args, model, model_old, best_alpha)
 
         dataset, num_classes, train_loader, test_loader, init_loader, name = all_train_sets[set_index]
         from reid.evaluators import extract_features
@@ -215,35 +181,27 @@ def get_normal_affinity(x,Norm=100):
     pre_matrix_origin=cosine_similarity(x,x)
     pre_affinity_matrix=F.softmax(pre_matrix_origin*Norm, dim=1)
     return pre_affinity_matrix
-
 def get_adaptive_alpha(args, model, model_old, all_train_sets, set_index):
-    """
-    LSTKC++ M*_e: compute delta via relation similarity (Eq.15).
-    delta = 1 - mean_i( dot((R^s)_i, (R^l)_i) )
-    Guaranteed in [0,1], robust to large domain gaps.
-    model     = short-term new model Theta_t^s
-    model_old = long-term old model  Theta_t^l
-    """
-    dataset_new, num_classes_new, train_loader_new, _, init_loader_new, name_new = all_train_sets[set_index]
-    features_all_new, _, _, _, _, _ = extract_features_voro(model, init_loader_new, get_mean_feature=True)
-    features_all_old, _, _, _, _, _ = extract_features_voro(model_old, init_loader_new, get_mean_feature=True)
+    dataset_new, num_classes_new, train_loader_new, _, init_loader_new, name_new = all_train_sets[
+        set_index]
+    features_all_new, labels_all, fnames_all, camids_all, features_mean_new, labels_named = extract_features_voro(model,
+                                                                                                          init_loader_new,
+                                                                                                          get_mean_feature=True)
+    features_all_old, _, _, _, features_mean_old, _ = extract_features_voro(model_old,init_loader_new,get_mean_feature=True)
 
-    features_all_new = torch.stack(features_all_new, dim=0)
-    features_all_old = torch.stack(features_all_old, dim=0)
+    features_all_new=torch.stack(features_all_new, dim=0)
+    features_all_old=torch.stack(features_all_old,dim=0)
+    Affin_new = get_normal_affinity(features_all_new)
+    Affin_old = get_normal_affinity(features_all_old)
 
-    Affin_new = get_normal_affinity(features_all_new)  # [n, n]
-    Affin_old = get_normal_affinity(features_all_old)  # [n, n]
+    Difference= torch.abs(Affin_new-Affin_old).sum(-1).mean()
 
-    # Eq.(15): delta = 1 - mean_i <R^s_i, R^l_i>
-    dot_sim = (Affin_new * Affin_old).sum(dim=1).mean()
-    alpha = float(1.0 - dot_sim)
-    alpha = max(0.0, min(1.0, alpha))  # strict clamp to [0,1]
+    alpha=float(1-Difference)
     return alpha
 
 
 
-def train_dataset(cfg, args, all_train_sets, all_test_only_sets, set_index, model, model_trans, model_trans2, out_channel,
-                                            writer, old_model_long=None, logger_res=None):
+def train_dataset(cfg, args, all_train_sets, all_test_only_sets, set_index, model, model_trans, model_trans2, out_channel, writer,logger_res=None):
     dataset, num_classes, train_loader, test_loader, init_loader, name = all_train_sets[
         set_index]
 
@@ -307,7 +265,6 @@ def train_dataset(cfg, args, all_train_sets, all_test_only_sets, set_index, mode
         train_loader.new_epoch()
         trainer.train(epoch, train_loader,  optimizer, training_phase=set_index + 1,
                       train_iters=len(train_loader), add_num=add_num, old_model=old_model,
-                      old_model_long=old_model_long,
                       )
         lr_scheduler.step()       
        
@@ -418,49 +375,6 @@ def linear_combination(args, model, model_old, alpha, model_old_id=-1):
     model_new.load_state_dict(model_new_state_dict)
     return model_new
 
-def backward_rectification(args, model_short_old, model_long_old, init_loader):
-    """
-    LSTKC++ Algorithm 1: Old Knowledge Backward Rectification (M*_o).
-    Searches optimal alpha in [0,1] using new data as unbiased reference.
-    Returns updated long-term model Theta_t^l.
-    """
-    from reid.evaluators import extract_features
-    from reid.evaluation_metrics import mean_ap
-    from reid.evaluators import pairwise_distance
-
-    best_mAP = 0.0
-    best_alpha = 0.0
-
-    for alpha_int in range(11):  # 0, 1, ..., 10  -> alpha = 0.0, 0.1, ..., 1.0
-        alpha = alpha_int / 10.0
-        model_fused = linear_combination(args, model_long_old, model_short_old, alpha)
-        model_fused.eval()
-
-        features, labels = extract_features(model_fused, init_loader)
-        fnames = list(features.keys())
-        feat_tensor = torch.stack([features[f] for f in fnames])
-        label_list  = [int(labels[f]) for f in fnames]
-
-        # self-ranking: use all features as both query and gallery
-        feat_norm = F.normalize(feat_tensor, p=2, dim=1)
-        dist = torch.pow(feat_norm, 2).sum(dim=1, keepdim=True).expand(len(fnames), len(fnames)) \
-             + torch.pow(feat_norm, 2).sum(dim=1, keepdim=True).expand(len(fnames), len(fnames)).t()
-        dist.addmm_(feat_norm, feat_norm.t(), beta=1, alpha=-2)
-        dist_np = dist.cpu().numpy()
-
-        label_arr = np.array(label_list)
-        cam_arr   = np.zeros(len(label_list), dtype=np.int32)  # dummy cams
-        mAP = mean_ap(dist_np, label_arr, label_arr, cam_arr, cam_arr)
-
-        if mAP > best_mAP:
-            best_mAP = mAP
-            best_alpha = alpha
-
-    print('M*_o backward rectification: best_alpha={:.1f}, best_mAP={:.4f}'.format(best_alpha, best_mAP))
-    model_long_new = linear_combination(args, model_long_old, model_short_old, best_alpha)
-    return model_long_new
-
-
 def set_zero(model):
     '''old model '''
     '''latest trained model'''
@@ -513,7 +427,7 @@ if __name__ == '__main__':
     
  
     parser.add_argument('--data-dir', type=str, metavar='PATH',
-                        default='/home/xiong_project/data/PRID/')
+                        default='/home/data/PRID/')
     parser.add_argument('--logs-dir', type=str, metavar='PATH',
                         default=osp.join('../logs/try'))
 

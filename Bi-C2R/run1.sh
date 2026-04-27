@@ -1,12 +1,1 @@
-CUDA_VISIBLE_DEVICES=2 python continual_train.py \
-    --logs-dir logs-lstkc-setting1/ \
-    --setting 1 \
-    --AF_weight 1.0 \
-    --weight_trans 100 \
-    --weight_anti 1 \
-    --weight_discri 0.007 \
-    --weight_transx 0.0005 \
-    --epochs0 80 \
-    --epochs 60 \
-    --milestones 30 \
-    --middle_test
+CUDA_VISIBLE_DEVICES=0 python continual_train.py --logs-dir logs-res-setting1/ --setting 1
