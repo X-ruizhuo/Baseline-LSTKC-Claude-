@@ -21,6 +21,9 @@ from torch.utils.tensorboard import SummaryWriter
 from lreid_dataset.datasets.get_data_loaders import build_data_loaders
 from tools.Logger_results import Logger_res
 
+# LSTKC++ 融合模块导入
+from reid.utils.knowledge_decouple import decouple_knowledge
+
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -205,7 +208,11 @@ def train_dataset(cfg, args, all_train_sets, all_test_only_sets, set_index, mode
     dataset, num_classes, train_loader, test_loader, init_loader, name = all_train_sets[
         set_index]
 
-    Epochs= args.epochs0 if 0==set_index else args.epochs          
+    Epochs= args.epochs0 if 0==set_index else args.epochs
+
+    # 初始化长短期模型为 None
+    model_long = None
+    model_short = None
 
     if set_index<=1:
         add_num = 0
@@ -221,12 +228,22 @@ def train_dataset(cfg, args, all_train_sets, all_test_only_sets, set_index, mode
         old_model = old_model.cuda()
         old_model.eval()
 
+        # LSTKC++: 知识解耦 - 将旧模型分解为长期和短期知识
+        print("\n" + "="*80)
+        print(f"数据集 {set_index}: {name} - 开始知识解耦")
+        print("="*80)
+        model_long, model_short = decouple_knowledge(
+            old_model, init_loader, args,
+            epochs=args.decouple_epochs if hasattr(args, 'decouple_epochs') else 5,
+            lr=args.decouple_lr if hasattr(args, 'decouple_lr') else 0.001
+        )
+
         add_num = sum([all_train_sets[i][1] for i in range(set_index)])
 
         org_classifier_params = model.module.classifier.weight.data
         model.module.classifier = nn.Linear(out_channel, add_num + num_classes, bias=False)
         model.module.classifier.weight.data[:add_num].copy_(org_classifier_params)
-        model.cuda()    
+        model.cuda()
 
         class_centers = initial_classifier(model, init_loader)
         model.module.classifier.weight.data[add_num:].copy_(class_centers)
@@ -265,6 +282,7 @@ def train_dataset(cfg, args, all_train_sets, all_test_only_sets, set_index, mode
         train_loader.new_epoch()
         trainer.train(epoch, train_loader,  optimizer, training_phase=set_index + 1,
                       train_iters=len(train_loader), add_num=add_num, old_model=old_model,
+                      model_long=model_long, model_short=model_short,
                       )
         lr_scheduler.step()       
        
@@ -446,5 +464,14 @@ if __name__ == '__main__':
     parser.add_argument('--weight_anti', type=float, default=1, help='weight for anti_forget loss')
     parser.add_argument('--weight_discri', type=float, default=0.007, help='weight for anti_discrimination loss')
     parser.add_argument('--weight_transx', type=float, default=0.0005, help='weight for transformation_x loss')
+
+    # LSTKC++ parameters
+    parser.add_argument('--decouple_epochs', type=int, default=5, help='epochs for knowledge decoupling')
+    parser.add_argument('--decouple_lr', type=float, default=0.001, help='learning rate for knowledge decoupling')
+    parser.add_argument('--use_lstkc', type=lambda x: x.lower() == 'true', default=True, help='whether to use LSTKC++ fusion')
+    parser.add_argument('--long_align_weight', type=float, default=1.0, help='weight for long-term alignment loss')
+    parser.add_argument('--long_relation_weight', type=float, default=2.0, help='weight for long-term relation loss')
+    parser.add_argument('--short_adapt_weight', type=float, default=0.5, help='weight for short-term adaptation loss')
+    parser.add_argument('--short_relation_weight', type=float, default=0.5, help='weight for short-term relation loss')
     
     main()
