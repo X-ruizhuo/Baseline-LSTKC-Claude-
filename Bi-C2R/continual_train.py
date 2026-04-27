@@ -340,7 +340,7 @@ def test_model(model, all_train_sets, all_test_sets, set_index, logger_res=None,
         print('Results on {}'.format(name))
 
         R1, mAP = evaluator.evaluate_rfl(test_loader, dataset.query, dataset.gallery,
-                                     cmc_flag=True, old_feat=feats_dir+name+'_features.pth.tar')
+                                     cmc_flag=True, old_feat=feats_dir+'/'+name+'_features.pth.tar')
         R1_all.append(R1)
         mAP_all.append(mAP)
         names_unseen = names_unseen + name + '\t'
