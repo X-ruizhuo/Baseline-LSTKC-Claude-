@@ -18,7 +18,8 @@ scipy
 tensorboard
 tensorflow
 timm
-tokenizers
+safetensors==0.4.1
+tokenizers==0.13.0
 tqdm
 yacs
 prettytable

@@ -183,6 +183,24 @@ _C.TEST.DIST_MAT = "dist_mat.npy"
 # Whether calculate the eval score option: 'True', 'False'
 _C.TEST.EVAL = False
 # ---------------------------------------------------------------------------- #
+# LSTKC
+# ---------------------------------------------------------------------------- #
+_C.LSTKC = CN()
+_C.LSTKC.ENABLE = False
+_C.LSTKC.LONG_TERM_WEIGHT = 0.5
+_C.LSTKC.SHORT_TERM_WEIGHT = 0.3
+_C.LSTKC.KNOWLEDGE_FILTER = True
+_C.LSTKC.FILTER_THRESHOLD = 0.6
+
+# ---------------------------------------------------------------------------- #
+# MEMORY
+# ---------------------------------------------------------------------------- #
+_C.MEMORY = CN()
+_C.MEMORY.GRADIENT_CHECKPOINT = False
+_C.MEMORY.MIXED_PRECISION = False
+_C.MEMORY.GRADIENT_ACCUMULATION = 1
+
+# ---------------------------------------------------------------------------- #
 # Misc options
 # ---------------------------------------------------------------------------- #
 # Path to checkpoint and saved log of trained model

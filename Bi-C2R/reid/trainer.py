@@ -4,6 +4,7 @@ import time
 from torch.nn import functional as F
 import torch
 import torch.nn as nn
+from torch.cuda.amp import autocast
 from .utils.meters import AverageMeter
 from .utils.feature_tools import *
 
@@ -12,6 +13,8 @@ from reid.utils.make_loss import make_loss
 import copy
 
 from reid.metric_learning.distance import cosine_similarity
+from reid.models.lstkc_modules import KnowledgeFilter
+
 class Trainer(object):
     def __init__(self,cfg,args, model, model_trans, model_trans2, num_classes, writer=None):
         super(Trainer, self).__init__()
@@ -28,13 +31,19 @@ class Trainer(object):
         self.criterion_transform_x = nn.CosineSimilarity(dim=-1, eps=1e-6)
         self.criterion_transform = nn.MSELoss()
         self.criterion_anti_forget = nn.KLDivLoss(reduction='batchmean')
-      
+
         self.KLDivLoss = nn.KLDivLoss(reduction='batchmean')
 
         self.weight_trans = args.weight_trans
         self.weight_anti = args.weight_anti
         self.weight_discri = args.weight_discri
         self.weight_transx = args.weight_transx
+
+        self.enable_lstkc = getattr(args, 'enable_lstkc', False)
+        if self.enable_lstkc:
+            self.knowledge_filter = KnowledgeFilter(feature_dim=2048, threshold=0.6).cuda()
+            self.weight_long_term = getattr(args, 'weight_long_term', 0.5)
+            self.weight_short_term = getattr(args, 'weight_short_term', 0.3)
 
     def loss_cr(self, targets_, s_features_old_, trans_old_features_norm_):
 
@@ -61,18 +70,18 @@ class Trainer(object):
         return self.weight_anti * self.criterion_anti_forget(new_sim_prob_unpair_log_, old_sim_prob_unpair_)
 
     def train(self, epoch, data_loader_train,  optimizer, training_phase,
-              train_iters=200, add_num=0, old_model=None,         
+              train_iters=200, add_num=0, old_model=None, scaler=None, gradient_accumulation_steps=1
               ):
 
         self.model.train()
         self.model_trans.train()
         self.model_trans2.train()
-        # freeze the bn layer totally
+
         for m in self.model.module.base.modules():
             if isinstance(m, nn.BatchNorm2d):
                 if m.weight.requires_grad == False and m.bias.requires_grad == False:
                     m.eval()
-        
+
         batch_time = AverageMeter()
         data_time = AverageMeter()
         losses_ce = AverageMeter()
@@ -85,13 +94,17 @@ class Trainer(object):
 
         end = time.time()
 
+        use_amp = scaler is not None
+
         for i in range(train_iters):
             train_inputs = data_loader_train.next()
             data_time.update(time.time() - end)
 
             s_inputs, targets, cids, domains, = self._parse_data(train_inputs)
             targets += add_num
-            s_features, bn_feat, cls_outputs, feat_final_layer = self.model(s_inputs)
+
+            with autocast(enabled=use_amp):
+                s_features, bn_feat, cls_outputs, feat_final_layer = self.model(s_inputs)
 
             '''calculate the base loss'''
             loss_ce, loss_tp = self.loss_fn(cls_outputs, s_features, targets, target_cam=None)
@@ -109,11 +122,19 @@ class Trainer(object):
                 divergence = self.cal_KL(Affinity_matrix_new, Affinity_matrix_old, targets)
                 loss = loss + divergence * self.AF_weight
 
-                
-                trans_old_features = self.model_trans(s_features_old)
-                trans_old_features_norm = F.normalize(trans_old_features, p=2, dim=1)
+                if self.enable_lstkc:
+                    trans_old_features_raw = self.model_trans(s_features_old, return_decomposition=False)
+                    trans_old_decomp, long_term_old, short_term_old, gate_old = self.model_trans(s_features_old, return_decomposition=True)
+                    trans_old_features = trans_old_decomp
 
-                trans_new_features = self.model_trans2(s_features)
+                    trans_new_features_raw = self.model_trans2(s_features, return_decomposition=False)
+                    trans_new_decomp, long_term_new, short_term_new, gate_new = self.model_trans2(s_features, return_decomposition=True)
+                    trans_new_features = trans_new_decomp
+                else:
+                    trans_old_features = self.model_trans(s_features_old)
+                    trans_new_features = self.model_trans2(s_features)
+
+                trans_old_features_norm = F.normalize(trans_old_features, p=2, dim=1)
                 trans_new_features_norm = F.normalize(trans_new_features, p=2, dim=1)
                 
                 trans_loss = self.weight_trans * self.criterion_transform(trans_old_features_norm, s_features)\
@@ -150,13 +171,31 @@ class Trainer(object):
                 trans_x_loss_backward = self.weight_transx * (1-self.criterion_transform_x(F.normalize(s_features_old-s_features, p=2, dim=1), F.normalize(s_features_old-trans_new_features_norm, p=2, dim=1)).mean())
                 trans_x_loss = trans_x_loss_forward + trans_x_loss_backward
                 losses_dc.update(trans_x_loss.item())
-                
-                loss = loss + trans_loss + anti_loss + discri_loss + trans_x_loss
-                
-            optimizer.zero_grad()
-            loss.backward()
 
-            optimizer.step()           
+                if self.enable_lstkc:
+                    loss_long_term = F.mse_loss(long_term_new, long_term_old.detach())
+                    loss_short_term = self.criterion_transform(short_term_new, s_features)
+
+                    quality_score = self.knowledge_filter(s_features_old, s_features)
+                    quality_weight = quality_score.mean()
+
+                    loss = loss + trans_loss * quality_weight + anti_loss + discri_loss + trans_x_loss + \
+                           self.weight_long_term * loss_long_term + self.weight_short_term * loss_short_term
+                else:
+                    loss = loss + trans_loss + anti_loss + discri_loss + trans_x_loss
+
+            if (i + 1) % gradient_accumulation_steps == 0:
+                optimizer.zero_grad()
+
+            if use_amp:
+                scaler.scale(loss / gradient_accumulation_steps).backward()
+                if (i + 1) % gradient_accumulation_steps == 0:
+                    scaler.step(optimizer)
+                    scaler.update()
+            else:
+                (loss / gradient_accumulation_steps).backward()
+                if (i + 1) % gradient_accumulation_steps == 0:
+                    optimizer.step()           
 
             batch_time.update(time.time() - end)
             end = time.time()

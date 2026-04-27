@@ -7,6 +7,7 @@ import os
 from torch.backends import cudnn
 import torch.nn as nn
 import random
+from torch.cuda.amp import autocast, GradScaler
 from config import cfg
 from reid.evaluators import Evaluator
 from reid.utils.logging import Logger
@@ -15,6 +16,7 @@ from reid.utils.lr_scheduler import WarmupMultiStepLR
 from reid.utils.feature_tools import *
 from reid.models.layers import DataParallel
 from reid.models.resnet import make_model, TransNet_adaptive
+from reid.models.lstkc_modules import AdaptiveKnowledgeIntegration
 from reid.trainer import Trainer
 from torch.utils.tensorboard import SummaryWriter
 
@@ -82,8 +84,15 @@ def main_worker(args, cfg):
     
     first_train_set = all_train_sets[0]
     model = make_model(args, num_class=first_train_set[1], camera_num=0, view_num=0)
-    model_trans=TransNet_adaptive()
-    model_trans2=TransNet_adaptive()
+
+    enable_lstkc = getattr(args, 'enable_lstkc', False)
+    model_trans = TransNet_adaptive(enable_lstkc=enable_lstkc)
+    model_trans2 = TransNet_adaptive(enable_lstkc=enable_lstkc)
+
+    if enable_lstkc:
+        adaptive_integration = AdaptiveKnowledgeIntegration(feature_dim=2048).cuda()
+    else:
+        adaptive_integration = None
 
     model.cuda()
     model_trans.cuda()
@@ -205,7 +214,10 @@ def train_dataset(cfg, args, all_train_sets, all_test_only_sets, set_index, mode
     dataset, num_classes, train_loader, test_loader, init_loader, name = all_train_sets[
         set_index]
 
-    Epochs= args.epochs0 if 0==set_index else args.epochs          
+    Epochs= args.epochs0 if 0==set_index else args.epochs
+
+    use_amp = getattr(args, 'use_amp', False)
+    scaler = GradScaler() if use_amp else None          
 
     if set_index<=1:
         add_num = 0
@@ -263,8 +275,10 @@ def train_dataset(cfg, args, all_train_sets, all_test_only_sets, set_index, mode
     for epoch in range(0, Epochs):
 
         train_loader.new_epoch()
+        gradient_accumulation_steps = getattr(args, 'gradient_accumulation_steps', 1)
         trainer.train(epoch, train_loader,  optimizer, training_phase=set_index + 1,
                       train_iters=len(train_loader), add_num=add_num, old_model=old_model,
+                      scaler=scaler, gradient_accumulation_steps=gradient_accumulation_steps
                       )
         lr_scheduler.step()       
        
@@ -427,7 +441,7 @@ if __name__ == '__main__':
     
  
     parser.add_argument('--data-dir', type=str, metavar='PATH',
-                        default='/home/cuizhenyu/data/PRID/')
+                        default='/home/data/PRID/')
     parser.add_argument('--logs-dir', type=str, metavar='PATH',
                         default=osp.join('../logs/try'))
 
@@ -446,5 +460,11 @@ if __name__ == '__main__':
     parser.add_argument('--weight_anti', type=float, default=1, help='weight for anti_forget loss')
     parser.add_argument('--weight_discri', type=float, default=0.007, help='weight for anti_discrimination loss')
     parser.add_argument('--weight_transx', type=float, default=0.0005, help='weight for transformation_x loss')
-    
+
+    parser.add_argument('--enable_lstkc', action='store_true', help='enable LSTKC++ modules')
+    parser.add_argument('--weight_long_term', type=float, default=0.5, help='weight for long-term knowledge loss')
+    parser.add_argument('--weight_short_term', type=float, default=0.3, help='weight for short-term knowledge loss')
+    parser.add_argument('--use_amp', action='store_true', help='use automatic mixed precision training')
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=1, help='gradient accumulation steps')
+
     main()

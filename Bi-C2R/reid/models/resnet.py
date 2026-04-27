@@ -168,16 +168,25 @@ class RBTBlock_dual(nn.Module):
         return output + x_inter
 
 class TransNet_adaptive(nn.Module):
-    def __init__(self, in_planes=2048, out_planes=2048, num_paths=4, num_prototype=16):
+    def __init__(self, in_planes=2048, out_planes=2048, num_paths=4, num_prototype=16, enable_lstkc=False):
         super(TransNet_adaptive, self).__init__()
-        
+
         self.trans_forward = nn.Sequential(
 			RBTBlock_dual(in_planes, out_planes, num_paths, num_prototype),
 			RBTBlock_dual(in_planes, out_planes, num_paths, num_prototype))
-        
+
         self.trans_forward.apply(weights_init_kaiming)
-        
-    def forward(self, x):
+
+        self.enable_lstkc = enable_lstkc
+        if enable_lstkc:
+            from reid.models.lstkc_modules import KnowledgeDecomposition
+            self.knowledge_decomp = KnowledgeDecomposition(in_planes)
+
+    def forward(self, x, return_decomposition=False):
         x = self.trans_forward(x)
-        
+
+        if self.enable_lstkc and return_decomposition:
+            decomposed, long_term, short_term, gate = self.knowledge_decomp(x)
+            return decomposed, long_term, short_term, gate
+
         return x
