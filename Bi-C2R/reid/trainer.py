@@ -12,7 +12,6 @@ from reid.utils.make_loss import make_loss
 import copy
 
 from reid.metric_learning.distance import cosine_similarity
-from reid.loss.lstkc_loss import LSTKCLoss
 class Trainer(object):
     def __init__(self,cfg,args, model, model_trans, model_trans2, num_classes, writer=None):
         super(Trainer, self).__init__()
@@ -29,22 +28,13 @@ class Trainer(object):
         self.criterion_transform_x = nn.CosineSimilarity(dim=-1, eps=1e-6)
         self.criterion_transform = nn.MSELoss()
         self.criterion_anti_forget = nn.KLDivLoss(reduction='batchmean')
-
+      
         self.KLDivLoss = nn.KLDivLoss(reduction='batchmean')
 
         self.weight_trans = args.weight_trans
         self.weight_anti = args.weight_anti
         self.weight_discri = args.weight_discri
         self.weight_transx = args.weight_transx
-
-        # LSTKC++ 融合: 长短期知识解耦损失
-        self.lstkc_loss = LSTKCLoss(
-            long_align_weight=getattr(args, 'long_align_weight', 1.0),
-            long_relation_weight=getattr(args, 'long_relation_weight', 2.0),
-            short_adapt_weight=getattr(args, 'short_adapt_weight', 0.5),
-            short_relation_weight=getattr(args, 'short_relation_weight', 0.5)
-        )
-        self.use_lstkc = getattr(args, 'use_lstkc', True)
 
     def loss_cr(self, targets_, s_features_old_, trans_old_features_norm_):
 
@@ -71,8 +61,7 @@ class Trainer(object):
         return self.weight_anti * self.criterion_anti_forget(new_sim_prob_unpair_log_, old_sim_prob_unpair_)
 
     def train(self, epoch, data_loader_train,  optimizer, training_phase,
-              train_iters=200, add_num=0, old_model=None,
-              model_long=None, model_short=None,
+              train_iters=200, add_num=0, old_model=None,         
               ):
 
         self.model.train()
@@ -93,11 +82,6 @@ class Trainer(object):
         losses_cr = AverageMeter()
         losses_ad = AverageMeter()
         losses_dc = AverageMeter()
-
-        # LSTKC++ 融合: 长短期知识损失统计
-        losses_lstkc = AverageMeter()
-        losses_long = AverageMeter()
-        losses_short = AverageMeter()
 
         end = time.time()
 
@@ -166,37 +150,8 @@ class Trainer(object):
                 trans_x_loss_backward = self.weight_transx * (1-self.criterion_transform_x(F.normalize(s_features_old-s_features, p=2, dim=1), F.normalize(s_features_old-trans_new_features_norm, p=2, dim=1)).mean())
                 trans_x_loss = trans_x_loss_forward + trans_x_loss_backward
                 losses_dc.update(trans_x_loss.item())
-
+                
                 loss = loss + trans_loss + anti_loss + discri_loss + trans_x_loss
-
-                # LSTKC++: 长短期知识融合损失
-                if self.use_lstkc and model_long is not None and model_short is not None:
-                    with torch.no_grad():
-                        feat_long, _, _, _ = model_long(s_inputs, get_all_feat=True)
-                        feat_short, _, _, _ = model_short(s_inputs, get_all_feat=True)
-                        if isinstance(feat_long, tuple):
-                            feat_long = feat_long[0]
-                        if isinstance(feat_short, tuple):
-                            feat_short = feat_short[0]
-
-                    # 转换长短期特征
-                    trans_long_features = self.model_trans(feat_long)
-                    trans_long_features = F.normalize(trans_long_features, p=2, dim=1)
-
-                    trans_short_features = self.model_trans2(feat_short)
-                    trans_short_features = F.normalize(trans_short_features, p=2, dim=1)
-
-                    # 计算LSTKC损失
-                    loss_lstkc, lstkc_dict = self.lstkc_loss(
-                        targets, s_features,
-                        feat_long, trans_long_features,
-                        feat_short, trans_short_features
-                    )
-
-                    loss = loss + loss_lstkc
-                    losses_lstkc.update(lstkc_dict['loss_lstkc_total'])
-                    losses_long.update(lstkc_dict['loss_long_align'] + lstkc_dict['loss_long_relation'])
-                    losses_short.update(lstkc_dict['loss_short_adapt'] + lstkc_dict['loss_short_relation'])
                 
             optimizer.zero_grad()
             loss.backward()
@@ -222,44 +177,23 @@ class Trainer(object):
                           global_step=epoch * train_iters + i)
             if (i + 1) == train_iters:
             #if 1 :
-                if self.use_lstkc and model_long is not None:
-                    print('Epoch: [{}][{}/{}]\t'
-                          'Time {:.3f} ({:.3f})\t'
-                          'Loss_ce {:.3f} ({:.3f})\t'
-                          'Loss_tp {:.3f} ({:.3f})\t'
-                          'Loss_ca {:.3f} ({:.3f})\t'
-                          'Loss_cr {:.3f} ({:.3f})\t'
-                          'Loss_ad {:.3f} ({:.3f})\t'
-                          'Loss_dc {:.3f} ({:.3f})\t'
-                          'Loss_lstkc {:.3f} ({:.3f})\t'
-                          .format(epoch, i + 1, train_iters,
-                                  batch_time.val, batch_time.avg,
-                                  losses_ce.val, losses_ce.avg,
-                                  losses_tr.val, losses_tr.avg,
-                                  losses_ca.val, losses_ca.avg,
-                                  losses_cr.val, losses_cr.avg,
-                                  losses_ad.val, losses_ad.avg,
-                                  losses_dc.val, losses_dc.avg,
-                                  losses_lstkc.val, losses_lstkc.avg,
-                      ))
-                else:
-                    print('Epoch: [{}][{}/{}]\t'
-                          'Time {:.3f} ({:.3f})\t'
-                          'Loss_ce {:.3f} ({:.3f})\t'
-                          'Loss_tp {:.3f} ({:.3f})\t'
-                          'Loss_ca {:.3f} ({:.3f})\t'
-                          'Loss_cr {:.3f} ({:.3f})\t'
-                          'Loss_ad {:.3f} ({:.3f})\t'
-                          'Loss_dc {:.3f} ({:.3f})\t'
-                          .format(epoch, i + 1, train_iters,
-                                  batch_time.val, batch_time.avg,
-                                  losses_ce.val, losses_ce.avg,
-                                  losses_tr.val, losses_tr.avg,
-                                  losses_ca.val, losses_ca.avg,
-                                  losses_cr.val, losses_cr.avg,
-                                  losses_ad.val, losses_ad.avg,
-                                  losses_dc.val, losses_dc.avg,
-                      ))       
+                print('Epoch: [{}][{}/{}]\t'
+                      'Time {:.3f} ({:.3f})\t'
+                      'Loss_ce {:.3f} ({:.3f})\t'
+                      'Loss_tp {:.3f} ({:.3f})\t'
+                      'Loss_ca {:.3f} ({:.3f})\t'
+                      'Loss_cr {:.3f} ({:.3f})\t'
+                      'Loss_ad {:.3f} ({:.3f})\t'
+                      'Loss_dc {:.3f} ({:.3f})\t'
+                      .format(epoch, i + 1, train_iters,
+                              batch_time.val, batch_time.avg,
+                              losses_ce.val, losses_ce.avg,
+                              losses_tr.val, losses_tr.avg,
+                              losses_ca.val, losses_ca.avg,
+                              losses_cr.val, losses_cr.avg,
+                              losses_ad.val, losses_ad.avg,
+                              losses_dc.val, losses_dc.avg,
+                  ))       
 
     def get_normal_affinity(self,x,Norm=0.1):
         pre_matrix_origin=cosine_similarity(x,x)
