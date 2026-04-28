@@ -152,11 +152,11 @@ def main_worker(args, cfg):
         from reid.evaluators import extract_features
         features, _ = extract_features(model, test_loader, training_phase=set_index+1)
         print ("Save Features: ", len(features))
-        torch.save({'features':features}, args.logs_dir+name+'_features.pth.tar')
+        torch.save({'features':features}, osp.join(args.logs_dir, name+'_features.pth.tar'))
         
         if args.trans_feat and set_index > 0:
             for each_data in training_set[0:set_index]:
-                each_old_gallery = torch.load(args.logs_dir + str(each_data) + '_features.pth.tar')
+                each_old_gallery = torch.load(osp.join(args.logs_dir, str(each_data) + '_features.pth.tar'))
                 features_dict = each_old_gallery['features']
                 feature_keys = list(features_dict.keys())
                 feature_values = list(features_dict.values())
@@ -176,8 +176,8 @@ def main_worker(args, cfg):
                         for i in range(start_pos, end_pos):
                             updated_features_dict[feature_keys[i]] = batch_features_trans[i - start_pos]
                     each_old_gallery['features'] = updated_features_dict
-                    torch.save(each_old_gallery, args.logs_dir + str(each_data) + '_features.pth.tar')
-                    print("Old Gallery Feature Updated to: ", args.logs_dir + str(each_data) + '_features.pth.tar')
+                    torch.save(each_old_gallery, osp.join(args.logs_dir, str(each_data) + '_features.pth.tar'))
+                    print("Old Gallery Feature Updated to: ", osp.join(args.logs_dir, str(each_data) + '_features.pth.tar'))
             print('=================================================================================')
         if args.set_zero:
             model_trans = set_zero(model_trans)
@@ -335,8 +335,13 @@ def test_model(model, all_train_sets, all_test_sets, set_index, logger_res=None,
         dataset, num_classes, train_loader, test_loader, init_loader, name = all_train_sets[i]
         print('Results on {}'.format(name))
 
+        feat_path = osp.join(feats_dir, name+'_features.pth.tar')
+        if not osp.exists(feat_path):
+            print('Feature file not found: {}, skipping evaluate_rfl'.format(feat_path))
+            continue
+
         R1, mAP = evaluator.evaluate_rfl(test_loader, dataset.query, dataset.gallery,
-                                     cmc_flag=True, old_feat=feats_dir+name+'_features.pth.tar')
+                                     cmc_flag=True, old_feat=feat_path)
         R1_all.append(R1)
         mAP_all.append(mAP)
         names_unseen = names_unseen + name + '\t'
